@@ -1,6 +1,4 @@
-```
- git clone https://user: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@ghfast.top/https://github.com/pfyao1101/iaso.git
-```
+
 
 # IASO Fail-Slow Detection Framework
 
