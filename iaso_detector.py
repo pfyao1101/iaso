@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+IASO Fail-Slow Detection Framework Implementation
+基于IASO论文的fail-slow检测脚本
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial']
+plt.rcParams['axes.unicode_minus'] = False
+
+
+class IasoDetector:
+    """IASO Fail-Slow检测器"""
+    
+    def __init__(self, 
+                 epoch_seconds=15,
+                 latency_multiplier=2.0,
+                 min_ttr_minutes=2.0,
+                 ratio_thresh=0.1):
+        """
+        初始化IASO检测器
+        
+        参数:
+        - epoch_seconds: 纪元时间窗口（秒）
+        - latency_multiplier: 判定慢盘的延迟倍数阈值
+        - min_ttr_minutes: 恢复到满分所需的最小时间（分钟）
+        - ratio_thresh: Timeout-Response比率的上限阈值
+        """
+        self.EPOCH_SECONDS = epoch_seconds
+        self.LATENCY_MULTIPLIER = latency_multiplier
+        self.MIN_TTR_MINUTES = min_ttr_minutes
+        self.RATIO_THRESH = ratio_thresh
+        
+        self.data = None
+        self.score_db = []
+        self.fail_slow_periods = []
+    
+    def load_and_preprocess(self, file_path):
+        """
+        加载和预处理数据
+        
+        参数:
+        - file_path: CSV文件路径
+        """
+        print(f"正在加载数据文件: {file_path}")
+        
+        # 加载CSV数据
+        self.data = pd.read_csv(file_path)
+        
+        # 转换时间戳
+        self.data['timestamp'] = pd.to_datetime(self.data['timestamp'], 
+                                                format='%m/%d/%Y %I:%M:%S %p')
+        
+        # 按时间排序
+        self.data = self.data.sort_values('timestamp').reset_index(drop=True)
+        
+        # 检查w_await列
+        if 'w_await' not in self.data.columns:
+            raise ValueError("数据中缺少 'w_await' 列")
+        
+        # 处理非数值或空值
+        self.data['w_await'] = pd.to_numeric(self.data['w_await'], errors='coerce')
+        self.data = self.data.dropna(subset=['w_await'])
+        
+        print(f"数据加载完成: {len(self.data)} 行")
+        print(f"时间范围: {self.data['timestamp'].min()} 到 {self.data['timestamp'].max()}")
+        print(f"设备列表: {self.data['device'].unique()}")
+        
+    def detect_fail_slow(self):
+        """
+        执行fail-slow检测
+        """
+        if self.data is None:
+            raise ValueError("请先加载数据!")
+        
+        print("\n开始执行IASO fail-slow检测...")
+        
+        # 获取时间范围
+        start_time = self.data['timestamp'].min()
+        end_time = self.data['timestamp'].max()
+        
+        # 初始化评分
+        previous_score = 1.0
+        epoch_start = start_time
+        epoch_count = 0
+        
+        # 按纪元处理数据
+        while epoch_start < end_time:
+            epoch_end = epoch_start + timedelta(seconds=self.EPOCH_SECONDS)
+            
+            # 切片当前纪元的数据
+            epoch_data = self.data[
+                (self.data['timestamp'] >= epoch_start) & 
+                (self.data['timestamp'] < epoch_end)
+            ]
+            
+            if len(epoch_data) == 0:
+                # 如果当前纪元没有数据，跳过
+                epoch_start = epoch_end
+                continue
+            
+            # 计算基准延迟（中位数）
+            median_latency = epoch_data['w_await'].median()
+            
+            # 定义慢盘阈值
+            latency_threshold = median_latency * self.LATENCY_MULTIPLIER
+            
+            # 统计慢盘数量
+            num_slow_drives = (epoch_data['w_await'] > latency_threshold).sum()
+            
+            # 统计总数据点数（作为总盘活跃度的近似）
+            total_drives = len(epoch_data)
+            
+            # 计算ToRespRatio
+            if total_drives > 0:
+                to_resp_ratio = num_slow_drives / total_drives
+            else:
+                to_resp_ratio = 0.0
+            
+            # 更新节点健康分数 (AIMD算法)
+            if to_resp_ratio == 0:
+                # 加性减少 (Additive Decrease)
+                min_ttr_seconds = self.MIN_TTR_MINUTES * 60
+                decrease_amount = (100 * self.EPOCH_SECONDS) / min_ttr_seconds
+                new_score = previous_score - decrease_amount
+                new_score = max(1.0, new_score)  # 确保分数不低于1
+            else:
+                # 乘性增加 (Multiplicative Increase)
+                min_ratio = min(to_resp_ratio, self.RATIO_THRESH)
+                near_thresh = min_ratio / self.RATIO_THRESH
+                increase_amount = previous_score * near_thresh
+                new_score = previous_score + increase_amount
+                new_score = min(100.0, new_score)  # 确保分数不高于100
+            
+            # 存储分数
+            self.score_db.append({
+                'timestamp': epoch_end,
+                'score': new_score,
+                'median_latency': median_latency,
+                'slow_drives': num_slow_drives,
+                'total_drives': total_drives,
+                'to_resp_ratio': to_resp_ratio
+            })
+            
+            previous_score = new_score
+            epoch_start = epoch_end
+            epoch_count += 1
+        
+        print(f"检测完成! 共处理 {epoch_count} 个纪元")
+        
+    def identify_fail_slow_periods(self, score_threshold=80, min_duration_epochs=3):
+        """
+        识别fail-slow时段
+        
+        参数:
+        - score_threshold: 分数阈值，超过此值视为fail-slow
+        - min_duration_epochs: 最小持续纪元数
+        """
+        if len(self.score_db) == 0:
+            print("警告: 还没有执行检测!")
+            return
+        
+        print(f"\n识别fail-slow时段 (阈值: {score_threshold}, 最小持续: {min_duration_epochs} 个纪元)...")
+        
+        scores_df = pd.DataFrame(self.score_db)
+        
+        # 标记高分时段
+        scores_df['is_high_score'] = scores_df['score'] > score_threshold
+        
+        # 识别连续的高分时段
+        scores_df['period_id'] = (
+            scores_df['is_high_score'] != scores_df['is_high_score'].shift()
+        ).cumsum()
+        
+        # 筛选出持续时间足够长的fail-slow时段
+        self.fail_slow_periods = []
+        for period_id, group in scores_df[scores_df['is_high_score']].groupby('period_id'):
+            if len(group) >= min_duration_epochs:
+                self.fail_slow_periods.append({
+                    'start_time': group['timestamp'].min(),
+                    'end_time': group['timestamp'].max(),
+                    'max_score': group['score'].max(),
+                    'avg_score': group['score'].mean(),
+                    'duration_epochs': len(group)
+                })
+        
+        print(f"发现 {len(self.fail_slow_periods)} 个fail-slow时段:")
+        for i, period in enumerate(self.fail_slow_periods, 1):
+            print(f"  {i}. {period['start_time']} 到 {period['end_time']}")
+            print(f"     最高分数: {period['max_score']:.2f}, 平均分数: {period['avg_score']:.2f}, 持续: {period['duration_epochs']} 个纪元")
+    
+    def visualize(self, output_file='iaso_detection_result.png'):
+        """
+        可视化检测结果
+        
+        参数:
+        - output_file: 输出图片文件名
+        """
+        if len(self.score_db) == 0:
+            print("警告: 还没有执行检测!")
+            return
+        
+        print(f"\n生成可视化图表...")
+        
+        scores_df = pd.DataFrame(self.score_db)
+        
+        # 创建图表
+        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+        
+        # 图1: 节点健康分数随时间变化
+        ax1 = axes[0]
+        ax1.plot(scores_df['timestamp'], scores_df['score'], 
+                linewidth=2, color='#2E86AB', label='Health Score')
+        ax1.axhline(y=80, color='red', linestyle='--', 
+                   linewidth=1.5, label='Fail-Slow Threshold (80)')
+        
+        # 标记fail-slow时段
+        for period in self.fail_slow_periods:
+            ax1.axvspan(period['start_time'], period['end_time'], 
+                       alpha=0.3, color='red')
+        
+        ax1.set_xlabel('Time', fontsize=12)
+        ax1.set_ylabel('Health Score', fontsize=12)
+        ax1.set_title('Node Health Score Over Time (IASO)', fontsize=14, fontweight='bold')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim([0, 105])
+        
+        # 图2: 中位延迟随时间变化
+        ax2 = axes[1]
+        ax2.plot(scores_df['timestamp'], scores_df['median_latency'], 
+                linewidth=2, color='#A23B72', label='Median w_await')
+        ax2.set_xlabel('Time', fontsize=12)
+        ax2.set_ylabel('Median Latency (ms)', fontsize=12)
+        ax2.set_title('Median Write Latency Over Time', fontsize=14, fontweight='bold')
+        ax2.legend(loc='best')
+        ax2.grid(True, alpha=0.3)
+        
+        # 图3: ToRespRatio随时间变化
+        ax3 = axes[2]
+        ax3.plot(scores_df['timestamp'], scores_df['to_resp_ratio'], 
+                linewidth=2, color='#F18F01', label='Timeout-Response Ratio')
+        ax3.axhline(y=self.RATIO_THRESH, color='orange', linestyle='--', 
+                   linewidth=1.5, label=f'Ratio Threshold ({self.RATIO_THRESH})')
+        ax3.set_xlabel('Time', fontsize=12)
+        ax3.set_ylabel('ToRespRatio', fontsize=12)
+        ax3.set_title('Timeout-Response Ratio Over Time', fontsize=14, fontweight='bold')
+        ax3.legend(loc='best')
+        ax3.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"图表已保存到: {output_file}")
+        plt.show()
+    
+    def export_results(self, output_file='iaso_scores.csv'):
+        """
+        导出检测结果到CSV
+        
+        参数:
+        - output_file: 输出CSV文件名
+        """
+        if len(self.score_db) == 0:
+            print("警告: 还没有执行检测!")
+            return
+        
+        scores_df = pd.DataFrame(self.score_db)
+        scores_df.to_csv(output_file, index=False)
+        print(f"\n结果已导出到: {output_file}")
+    
+    def print_summary(self):
+        """打印检测摘要"""
+        if len(self.score_db) == 0:
+            print("警告: 还没有执行检测!")
+            return
+        
+        scores_df = pd.DataFrame(self.score_db)
+        
+        print("\n" + "="*60)
+        print("IASO Fail-Slow Detection Summary")
+        print("="*60)
+        print(f"总纪元数: {len(scores_df)}")
+        print(f"平均健康分数: {scores_df['score'].mean():.2f}")
+        print(f"最高健康分数: {scores_df['score'].max():.2f}")
+        print(f"最低健康分数: {scores_df['score'].min():.2f}")
+        print(f"分数标准差: {scores_df['score'].std():.2f}")
+        print(f"\n平均中位延迟: {scores_df['median_latency'].mean():.2f} ms")
+        print(f"最高中位延迟: {scores_df['median_latency'].max():.2f} ms")
+        print(f"\nFail-Slow时段数量: {len(self.fail_slow_periods)}")
+        
+        if len(self.fail_slow_periods) > 0:
+            total_duration = sum(p['duration_epochs'] for p in self.fail_slow_periods)
+            print(f"Fail-Slow总持续时间: {total_duration} 个纪元 "
+                  f"({total_duration * self.EPOCH_SECONDS} 秒)")
+        print("="*60)
+
+
+def main():
+    """主函数"""
+    print("="*60)
+    print("IASO Fail-Slow Detection Framework")
+    print("="*60)
+    
+    # 创建检测器实例
+    detector = IasoDetector(
+        epoch_seconds=15,          # 纪元时间窗口: 15秒
+        latency_multiplier=2.0,    # 慢盘判定倍数: 2.0
+        min_ttr_minutes=2.0,       # 恢复时间: 2分钟
+        ratio_thresh=0.1           # 比率阈值: 0.1
+    )
+    
+    # 加载数据
+    detector.load_and_preprocess('a.csv')
+    
+    # 执行检测
+    detector.detect_fail_slow()
+    
+    # 识别fail-slow时段
+    detector.identify_fail_slow_periods(score_threshold=80, min_duration_epochs=3)
+    
+    # 打印摘要
+    detector.print_summary()
+    
+    # 导出结果
+    detector.export_results('iaso_scores.csv')
+    
+    # 可视化
+    detector.visualize('iaso_detection_result.png')
+    
+    print("\n✓ 所有操作完成!")
+
+
+if __name__ == "__main__":
+    main()
