@@ -5,6 +5,7 @@ IASO Fail-Slow Detection Framework Implementation
 基于IASO论文的fail-slow检测脚本
 """
 
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,15 +18,105 @@ warnings.filterwarnings('ignore')
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial']
 plt.rcParams['axes.unicode_minus'] = False
 
+def parse_args():
+    """
+    解析命令行参数
+    
+    返回:
+    - args: 解析后的命令行参数对象
+    """
+    parser = argparse.ArgumentParser(
+        description='IASO Fail-Slow Detection Framework - 基于IASO论文的fail-slow检测脚本',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # 数据文件参数
+    parser.add_argument(
+        '--input-file', '-i',
+        type=str,
+        default='data/a.csv',
+        help='输入的CSV数据文件路径'
+    )
+    
+    parser.add_argument(
+        '--output-dir', '-o',
+        type=str,
+        default='result/',
+        help='输出的评分CSV文件路径'
+    )
+    
+    # IASO算法参数
+    parser.add_argument(
+        '--epoch-seconds', '-e',
+        type=int,
+        default=1,
+        help='纪元时间窗口长度（秒）'
+    )
+    
+    parser.add_argument(
+        '--latency-multiplier', '-l',
+        type=float,
+        default=2.0,
+        help='判定慢盘的延迟倍数阈值（相对于中位数延迟）'
+    )
+    
+    parser.add_argument(
+        '--min-ttr-minutes', '-t',
+        type=float,
+        default=2.0,
+        help='从100分恢复到1分所需的最小时间（分钟）'
+    )
+    
+    parser.add_argument(
+        '--ratio-thresh', '-r',
+        type=float,
+        default=0.1,
+        help='Timeout-Response比率的上限阈值, 控制分数增长'
+    )
+    
+    # 检测参数
+    parser.add_argument(
+        '--hard-latency-threshold', '-a',
+        type=float,
+        default=100.0,
+        help='慢盘的硬性延迟阈值（毫秒）'
+    )
+    
+    parser.add_argument(
+        '--score-threshold', '-s',
+        type=float,
+        default=80.0,
+        help='Fail-slow分数阈值，超过此值视为fail-slow'
+    )
+    
+    parser.add_argument(
+        '--min-duration-epochs', '-d',
+        type=int,
+        default=3,
+        help='Fail-slow最小持续纪元数'
+    )
+    
+    # 输出控制参数
+    parser.add_argument(
+        '--no-plot',
+        action='store_true',
+        help='不生成可视化图表'
+    )
+    
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='输出详细信息'
+    )
+    
+    return parser.parse_args()
+
 
 class IasoDetector:
     """IASO Fail-Slow检测器"""
     
     def __init__(self, 
-                 epoch_seconds=15,
-                 latency_multiplier=2.0,
-                 min_ttr_minutes=2.0,
-                 ratio_thresh=0.1):
+                 args):
         """
         初始化IASO检测器
         
@@ -35,11 +126,15 @@ class IasoDetector:
         - min_ttr_minutes: 恢复到满分所需的最小时间（分钟）
         - ratio_thresh: Timeout-Response比率的上限阈值
         """
-        self.EPOCH_SECONDS = epoch_seconds
-        self.LATENCY_MULTIPLIER = latency_multiplier
-        self.MIN_TTR_MINUTES = min_ttr_minutes
-        self.RATIO_THRESH = ratio_thresh
-        
+        self.EPOCH_SECONDS = args.epoch_seconds
+        self.LATENCY_MULTIPLIER = args.latency_multiplier
+        self.MIN_TTR_MINUTES = args.min_ttr_minutes
+        self.RATIO_THRESH = args.ratio_thresh
+        self.HARD_LATENCY_THRESHOLD = args.hard_latency_threshold
+
+        self.output_dir = args.output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
         self.data = None
         self.score_db = []
         self.fail_slow_periods = []
@@ -74,6 +169,8 @@ class IasoDetector:
         print(f"数据加载完成: {len(self.data)} 行")
         print(f"时间范围: {self.data['timestamp'].min()} 到 {self.data['timestamp'].max()}")
         print(f"设备列表: {self.data['device'].unique()}")
+
+        # print(self.data)
         
     def detect_fail_slow(self):
         """
@@ -112,13 +209,14 @@ class IasoDetector:
             median_latency = epoch_data['w_await'].median()
             
             # 定义慢盘阈值
-            latency_threshold = median_latency * self.LATENCY_MULTIPLIER
-            
+            relative_threshold = median_latency * self.LATENCY_MULTIPLIER
+            latency_threshold = min(self.HARD_LATENCY_THRESHOLD, relative_threshold)
+
             # 统计慢盘数量
-            num_slow_drives = (epoch_data['w_await'] > latency_threshold).sum()
+            num_slow_drives = (epoch_data[epoch_data['w_await'] > latency_threshold]['device']).nunique()
             
             # 统计总数据点数（作为总盘活跃度的近似）
-            total_drives = len(epoch_data)
+            total_drives = epoch_data['device'].nunique()
             
             # 计算ToRespRatio
             if total_drives > 0:
@@ -146,8 +244,9 @@ class IasoDetector:
                 'timestamp': epoch_end,
                 'score': new_score,
                 'median_latency': median_latency,
-                'slow_drives': num_slow_drives,
-                'total_drives': total_drives,
+                'num_slow_drives': num_slow_drives,
+                'num_total_drives': total_drives,
+                'slow_drives': epoch_data[epoch_data['w_await'] > latency_threshold]['device'].unique().tolist(),
                 'to_resp_ratio': to_resp_ratio
             })
             
@@ -156,7 +255,12 @@ class IasoDetector:
             epoch_count += 1
         
         print(f"检测完成! 共处理 {epoch_count} 个纪元")
-        
+    
+    # TODO
+    # 这个后续需要看数据是怎么组成的
+    # 如果不同节点的数据在同一个文件里，那么需要先按节点分组再处理
+    # 处理过程为计算每个节点在每个time interval的3-th分数，在进行聚类
+    # 如果不在一个文件里，那么就读取不同节点的分数文件，再按上述方法进行处理
     def identify_fail_slow_periods(self, score_threshold=80, min_duration_epochs=3):
         """
         识别fail-slow时段
@@ -173,7 +277,6 @@ class IasoDetector:
         
         scores_df = pd.DataFrame(self.score_db)
         
-        # 标记高分时段
         scores_df['is_high_score'] = scores_df['score'] > score_threshold
         
         # 识别连续的高分时段
@@ -198,13 +301,17 @@ class IasoDetector:
             print(f"  {i}. {period['start_time']} 到 {period['end_time']}")
             print(f"     最高分数: {period['max_score']:.2f}, 平均分数: {period['avg_score']:.2f}, 持续: {period['duration_epochs']} 个纪元")
     
-    def visualize(self, output_file='iaso_detection_result.png'):
+    def visualize(self):
         """
         可视化检测结果
         
         参数:
         - output_file: 输出图片文件名
         """
+        # TODO
+        # 按照主机名完成图片保存
+        output_file = os.path.join(self.output_dir, 'host1.png')
+
         if len(self.score_db) == 0:
             print("警告: 还没有执行检测!")
             return
@@ -262,13 +369,17 @@ class IasoDetector:
         print(f"图表已保存到: {output_file}")
         plt.show()
     
-    def export_results(self, output_file='iaso_scores.csv'):
+    def export_results(self):
         """
         导出检测结果到CSV
         
         参数:
         - output_file: 输出CSV文件名
         """
+        # TODO
+        # 按照主机名完成文件保存
+        output_file = os.path.join(self.output_dir, 'host1_scores.csv')
+
         if len(self.score_db) == 0:
             print("警告: 还没有执行检测!")
             return
@@ -277,6 +388,7 @@ class IasoDetector:
         scores_df.to_csv(output_file, index=False)
         print(f"\n结果已导出到: {output_file}")
     
+    # TODO
     def print_summary(self):
         """打印检测摘要"""
         if len(self.score_db) == 0:
@@ -303,100 +415,6 @@ class IasoDetector:
                   f"({total_duration * self.EPOCH_SECONDS} 秒)")
         print("="*60)
 
-
-def parse_args():
-    """
-    解析命令行参数
-    
-    返回:
-    - args: 解析后的命令行参数对象
-    """
-    parser = argparse.ArgumentParser(
-        description='IASO Fail-Slow Detection Framework - 基于IASO论文的fail-slow检测脚本',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    
-    # 数据文件参数
-    parser.add_argument(
-        '--input-file', '-i',
-        type=str,
-        default='data/a.csv',
-        help='输入的CSV数据文件路径'
-    )
-    
-    parser.add_argument(
-        '--output-csv', '-o',
-        type=str,
-        default='result/iaso_scores.csv',
-        help='输出的评分CSV文件路径'
-    )
-    
-    parser.add_argument(
-        '--output-plot', '-p',
-        type=str,
-        default='result/iaso_detection_result.png',
-        help='输出的可视化图片文件路径'
-    )
-    
-    # IASO算法参数
-    parser.add_argument(
-        '--epoch-seconds', '-e',
-        type=int,
-        default=15,
-        help='纪元时间窗口长度（秒）'
-    )
-    
-    parser.add_argument(
-        '--latency-multiplier', '-l',
-        type=float,
-        default=2.0,
-        help='判定慢盘的延迟倍数阈值（相对于中位数延迟）'
-    )
-    
-    parser.add_argument(
-        '--min-ttr-minutes', '-t',
-        type=float,
-        default=2.0,
-        help='从100分恢复到1分所需的最小时间（分钟）'
-    )
-    
-    parser.add_argument(
-        '--ratio-thresh', '-r',
-        type=float,
-        default=0.1,
-        help='Timeout-Response比率的上限阈值'
-    )
-    
-    # 检测参数
-    parser.add_argument(
-        '--score-threshold', '-s',
-        type=float,
-        default=80.0,
-        help='Fail-slow分数阈值，超过此值视为fail-slow'
-    )
-    
-    parser.add_argument(
-        '--min-duration-epochs', '-d',
-        type=int,
-        default=3,
-        help='Fail-slow最小持续纪元数'
-    )
-    
-    # 输出控制参数
-    parser.add_argument(
-        '--no-plot',
-        action='store_true',
-        help='不生成可视化图表'
-    )
-    
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='输出详细信息'
-    )
-    
-    return parser.parse_args()
-
 if __name__ == "__main__":
     # 解析命令行参数
     args = parse_args()
@@ -420,10 +438,7 @@ if __name__ == "__main__":
     
     # 创建检测器实例（使用命令行参数）
     detector = IasoDetector(
-        epoch_seconds=args.epoch_seconds,
-        latency_multiplier=args.latency_multiplier,
-        min_ttr_minutes=args.min_ttr_minutes,
-        ratio_thresh=args.ratio_thresh
+        args
     )
     
     # 加载数据
@@ -432,6 +447,9 @@ if __name__ == "__main__":
     # 执行检测
     detector.detect_fail_slow()
     
+    # 导出结果
+    detector.export_results()
+
     # 识别fail-slow时段
     detector.identify_fail_slow_periods(
         score_threshold=args.score_threshold, 
@@ -441,11 +459,6 @@ if __name__ == "__main__":
     # 打印摘要
     detector.print_summary()
     
-    # 导出结果
-    detector.export_results(args.output_csv)
-    
     # 可视化
     if not args.no_plot:
-        detector.visualize(args.output_plot)
-    
-    print("\n✓ 所有操作完成!")
+        detector.visualize()

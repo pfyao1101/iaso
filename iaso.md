@@ -2,7 +2,7 @@
 
 ### **1. 目标**
 
-我们的目标是基于 `IASO: A Fail-Slow Detection and Mitigation Framework` 论文中的核心思想，实现一个fail-slow检测脚本。该脚本将处理您提供的 `a.csv` 数据，最终输出**该主机（Node）在不同时间点的健康度分数**，并识别出潜在的fail-slow时段。
+我们的目标是基于 `IASO: A Fail-Slow Detection and Mitigation Framework` 论文中的核心思想，实现一个fail-slow检测脚本。最终输出**该主机（Node）在不同时间点的健康度分数**，并识别出潜在的fail-slow时段。
 
 由于我们只有一台主机的数据，我们将复现IASO的**单节点评分机制**，这与Perseus论文中对IASO-based model的复现思路一致。
 
@@ -14,11 +14,11 @@
 | :--- | :--- | :--- |
 | **节点 (Node)** | 整个 `host1.csv` 文件所代表的主机 | IASO的评分对象是节点级别。 |
 | **对等体 (Peer)** | CSV中的每个`device` (e.g., `nvme2n1`, `nvme3n1`) | 节点内的各个磁盘驱动器互为对等体。 |
-| **纪元 (Epoch)** | 一个固定的时间窗口（例如，15秒） | 我们将按时间窗口处理数据。 |
+| **纪元 (Epoch)** | 一个固定的时间窗口（epoch-seconds进行设定） | 我们将按时间窗口处理数据。 |
 | **延迟 (Latency)** | CSV中的 `w_await` 列 (单位: ms) | 这是判断驱动器是否“慢”的核心指标。 |
-| **超时信号 (Timeout)** | **逻辑模拟**：一个驱动器被判定为“慢” | 原始IASO依赖应用层超时。在这里，我们模拟它：如果一个盘的延迟远超其兄弟盘，就记为一个“超时”。 |
+| **超时信号 (Timeout)** | **逻辑模拟**：一个驱动器被判定为“慢” | 原始IASO依赖应用层超时。在这里，我们模拟它：如果一个盘的延迟远超其兄弟盘的两倍(latency-multiplier来进行设定)或者超过一个已经设定的阈值(hard-latency-threshold)，就记为一个“超时”。 |
 | **健康分数 (Score)** | 一个介于1到100的浮点数 | 1代表完全健康，100代表严重fail-slow。 |
-| **ScoreDB** | 一个数据结构（如Python字典或Pandas DataFrame） | 用于存储每个纪元计算出的节点健康分数。 |
+| **ScoreDB** | 一个数据结构 | 用于存储每个纪元计算出的节点分数。 |
 
 ### **3. 详细实现步骤**
 
@@ -32,25 +32,6 @@
 
 在代码的开头，将所有可调参数清晰地定义出来。这些参数直接源于IASO论文，是算法的核心。
 
-```python
-# --- 框架核心参数 ---
-
-# 1. 纪元（Epoch）的长度（秒）
-EPOCH_SECONDS = 15  # Perseus论文中为匹配数据粒度设为15秒，这里可以根据你的数据调整
-
-# 2. 判定“慢盘”的延迟倍数阈值 (我们自定义的关键参数)
-# 一个盘的延迟 > (中位数延迟 * LATENCY_MULTIPLIER) => 判定为慢盘
-LATENCY_MULTIPLIER = 2.0
-
-# 3. 从100分恢复到1分所需的最小时间（分钟）
-# 用于“加性减少”计分，防止分数下降过快
-MIN_TTR_MINUTES = 2.0
-
-# 4. Timeout-Response比率的上限阈值
-# 用于“乘性增加”计分，限制单次分数增加的剧烈程度
-RATIO_THRESH = 0.1
-```
-
 #### **第二步：主循环 - 按纪元处理数据**
 
 这是算法的核心。你需要编写一个循环，按 `EPOCH_SECONDS` 的步长遍历整个数据集。
@@ -60,8 +41,7 @@ RATIO_THRESH = 0.1
 1.  **切片数据**: 获取当前时间窗口内（例如 `t` 到 `t + 15s`）的所有数据行。
 
 2.  **模拟“超时信号” (关键步骤)**:
-    *   **计算基准延迟**: 在当前纪元的数据中，计算所有`device`的`w_await`的中位数（Median）。使用中位数比平均数更稳健，不易受极端值影响。
-    *   **定义慢盘阈值**: `latency_threshold = median_w_await * LATENCY_MULTIPLIER`。
+    *   **计算慢盘阈值**。
     *   **统计慢盘数量**: 遍历当前纪元内的所有数据点，统计有多少个驱动器的`w_await`值**超过**了`latency_threshold`。得到 `num_slow_drives`。
     *   **统计总盘数**: 获取当前节点上活跃的驱动器总数 `total_drives`。
 
@@ -102,53 +82,3 @@ RATIO_THRESH = 0.1
     *   使用`matplotlib`或`seaborn`库，绘制节点健康分数的时序图。
     *   在图上可以清晰地看到分数何时平稳（在低位），何时开始攀升，何时达到峰值，以及何时恢复。
     *   可以将识别出的fail-slow时段在图上用不同颜色或垂直线标记出来，使其一目了然。
-
-### **4. 伪代码**
-
-```python
-# 1. 初始化
-load_and_preprocess_data("host1.csv")
-parameters = define_parameters()
-score_db = {}
-previous_score = 1.0
-
-# 2. 按纪元循环
-for epoch_start_time in get_time_windows(data, parameters.EPOCH_SECONDS):
-    epoch_end_time = epoch_start_time + parameters.EPOCH_SECONDS
-    epoch_data = slice_data(data, epoch_start_time, epoch_end_time)
-
-    if epoch_data is empty:
-        continue
-
-    # 3. 模拟超时信号
-    median_latency = calculate_median(epoch_data['w_await'])
-    latency_threshold = median_latency * parameters.LATENCY_MULTIPLIER
-    num_slow_drives = count_if(epoch_data['w_await'] > latency_threshold)
-    total_drives = get_unique_device_count(epoch_data)
-
-    # 4. 计算Ratio
-    ToRespRatio = num_slow_drives / total_drives
-
-    # 5. 更新分数 (AIMD)
-    if ToRespRatio == 0:
-        # 加性减少
-        new_score = calculate_additive_decrease(previous_score, parameters)
-    else:
-        # 乘性增加
-        new_score = calculate_multiplicative_increase(previous_score, ToRespRatio, parameters)
-
-    # 6. 存储并更新
-    score_db[epoch_end_time] = new_score
-    previous_score = new_score
-
-# 7. 分析和可视化
-fail_slow_periods = find_high_score_periods(score_db, threshold=80, duration=3)
-plot_score_over_time(score_db, fail_slow_periods)
-```
-
-### **5. 参数调优指南**
-
-*   `EPOCH_SECONDS`: 较小的值能更快地响应变化，但可能引入更多噪声；较大的值更平滑，但响应慢。15秒是一个很好的起点。
-*   `LATENCY_MULTIPLIER`: **最关键的灵敏度参数**。值越低（如1.5），检测器越敏感，但也可能产生更多误报（将正常的负载波动识别为慢盘）。值越高（如3.0），检测器越不敏感，只会上报非常严重的延迟问题。建议从2.0开始尝试。
-*   `MIN_TTR_MINUTES`: 控制分数恢复的速度。如果你的系统负载变化快，可以适当调低此值，让分数恢复得更快。
-*   `RATIO_THRESH`: 控制分数增长的“加速度”。如果希望系统在检测到少量慢盘时就迅速提高警报级别，可以降低此值。
