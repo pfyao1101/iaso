@@ -12,6 +12,8 @@ print("="*60)
 print("IASO Fail-Slow Detection Framework - Test Version")
 print("="*60)
 
+DATA_FILE = 'data/a.csv'
+
 # 参数设置
 EPOCH_SECONDS = 15
 LATENCY_MULTIPLIER = 2.0
@@ -27,7 +29,7 @@ print(f"  比率阈值: {RATIO_THRESH}")
 # 加载数据
 print("\n正在加载数据...")
 try:
-    data = pd.read_csv('a.csv')
+    data = pd.read_csv(DATA_FILE)
     print(f"✓ 数据加载成功: {len(data)} 行")
     
     # 转换时间戳
@@ -159,7 +161,7 @@ try:
     print("="*60)
     
     # 导出结果
-    output_file = 'iaso_scores.csv'
+    output_file = 'result/iaso_scores.csv'
     scores_df.to_csv(output_file, index=False)
     print(f"\n✓ 结果已导出到: {output_file}")
     

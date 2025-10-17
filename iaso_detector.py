@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
+import argparse
 warnings.filterwarnings('ignore')
 
 # 设置中文字体支持
@@ -303,40 +304,148 @@ class IasoDetector:
         print("="*60)
 
 
-def main():
-    """主函数"""
+def parse_args():
+    """
+    解析命令行参数
+    
+    返回:
+    - args: 解析后的命令行参数对象
+    """
+    parser = argparse.ArgumentParser(
+        description='IASO Fail-Slow Detection Framework - 基于IASO论文的fail-slow检测脚本',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # 数据文件参数
+    parser.add_argument(
+        '--input-file', '-i',
+        type=str,
+        default='data/a.csv',
+        help='输入的CSV数据文件路径'
+    )
+    
+    parser.add_argument(
+        '--output-csv', '-o',
+        type=str,
+        default='result/iaso_scores.csv',
+        help='输出的评分CSV文件路径'
+    )
+    
+    parser.add_argument(
+        '--output-plot', '-p',
+        type=str,
+        default='result/iaso_detection_result.png',
+        help='输出的可视化图片文件路径'
+    )
+    
+    # IASO算法参数
+    parser.add_argument(
+        '--epoch-seconds', '-e',
+        type=int,
+        default=15,
+        help='纪元时间窗口长度（秒）'
+    )
+    
+    parser.add_argument(
+        '--latency-multiplier', '-l',
+        type=float,
+        default=2.0,
+        help='判定慢盘的延迟倍数阈值（相对于中位数延迟）'
+    )
+    
+    parser.add_argument(
+        '--min-ttr-minutes', '-t',
+        type=float,
+        default=2.0,
+        help='从100分恢复到1分所需的最小时间（分钟）'
+    )
+    
+    parser.add_argument(
+        '--ratio-thresh', '-r',
+        type=float,
+        default=0.1,
+        help='Timeout-Response比率的上限阈值'
+    )
+    
+    # 检测参数
+    parser.add_argument(
+        '--score-threshold', '-s',
+        type=float,
+        default=80.0,
+        help='Fail-slow分数阈值，超过此值视为fail-slow'
+    )
+    
+    parser.add_argument(
+        '--min-duration-epochs', '-d',
+        type=int,
+        default=3,
+        help='Fail-slow最小持续纪元数'
+    )
+    
+    # 输出控制参数
+    parser.add_argument(
+        '--no-plot',
+        action='store_true',
+        help='不生成可视化图表'
+    )
+    
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='输出详细信息'
+    )
+    
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    # 解析命令行参数
+    args = parse_args()
+    
     print("="*60)
     print("IASO Fail-Slow Detection Framework")
     print("="*60)
     
-    # 创建检测器实例
+    if args.verbose:
+        print("运行参数:")
+        print(f"  输入文件: {args.input_file}")
+        print(f"  输出CSV: {args.output_csv}")
+        print(f"  输出图片: {args.output_plot}")
+        print(f"  纪元时间窗口: {args.epoch_seconds} 秒")
+        print(f"  延迟倍数阈值: {args.latency_multiplier}")
+        print(f"  恢复时间: {args.min_ttr_minutes} 分钟")
+        print(f"  比率阈值: {args.ratio_thresh}")
+        print(f"  分数阈值: {args.score_threshold}")
+        print(f"  最小持续纪元数: {args.min_duration_epochs}")
+        print("="*60)
+    
+    # 创建检测器实例（使用命令行参数）
     detector = IasoDetector(
-        epoch_seconds=15,          # 纪元时间窗口: 15秒
-        latency_multiplier=2.0,    # 慢盘判定倍数: 2.0
-        min_ttr_minutes=2.0,       # 恢复时间: 2分钟
-        ratio_thresh=0.1           # 比率阈值: 0.1
+        epoch_seconds=args.epoch_seconds,
+        latency_multiplier=args.latency_multiplier,
+        min_ttr_minutes=args.min_ttr_minutes,
+        ratio_thresh=args.ratio_thresh
     )
     
     # 加载数据
-    detector.load_and_preprocess('a.csv')
+    detector.load_and_preprocess(args.input_file)
     
     # 执行检测
     detector.detect_fail_slow()
     
     # 识别fail-slow时段
-    detector.identify_fail_slow_periods(score_threshold=80, min_duration_epochs=3)
+    detector.identify_fail_slow_periods(
+        score_threshold=args.score_threshold, 
+        min_duration_epochs=args.min_duration_epochs
+    )
     
     # 打印摘要
     detector.print_summary()
     
     # 导出结果
-    detector.export_results('iaso_scores.csv')
+    detector.export_results(args.output_csv)
     
     # 可视化
-    detector.visualize('iaso_detection_result.png')
+    if not args.no_plot:
+        detector.visualize(args.output_plot)
     
     print("\n✓ 所有操作完成!")
-
-
-if __name__ == "__main__":
-    main()
