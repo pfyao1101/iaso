@@ -4,7 +4,7 @@
 
 我们的目标是基于 `IASO: A Fail-Slow Detection and Mitigation Framework` 论文中的核心思想，实现一个fail-slow检测脚本。最终输出**该主机（Node）在不同时间点的健康度分数**，并识别出潜在的fail-slow时段。
 
-由于我们只有一台主机的数据，我们将复现IASO的**单节点评分机制**，这与Perseus论文中对IASO-based model的复现思路一致。
+然后对依据计算所得的每个节点的分数实现慢节点的识别
 
 ### **2. 核心概念与数据映射**
 
@@ -65,6 +65,8 @@
             *   `increase_amount = previous_score * nearThresh`
             *   `new_score = previous_score + increase_amount`
             *   **确保分数不高于100**: `new_score = min(100.0, new_score)`
+            TODO
+            节点中的盘的个数太少导致分数增加地过快
 
 5.  **存储分数**:
     *   将当前纪元的结束时间戳和计算出的 `new_score` 存入你的“ScoreDB”（例如，一个列表或字典）。
@@ -82,3 +84,8 @@
     *   使用`matplotlib`或`seaborn`库，绘制节点健康分数的时序图。
     *   在图上可以清晰地看到分数何时平稳（在低位），何时开始攀升，何时达到峰值，以及何时恢复。
     *   可以将识别出的fail-slow时段在图上用不同颜色或垂直线标记出来，使其一目了然。
+
+
+#### **第四步 慢节点的识别**
+
+在一段设定的time interval（IASO文中设定为10min）中计算每个节点的30 th value然后使用DBSCAN进行聚类

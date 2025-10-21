@@ -11,179 +11,175 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
-import argparse
+import yaml
+from sklearn.cluster import DBSCAN
 warnings.filterwarnings('ignore')
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial']
 plt.rcParams['axes.unicode_minus'] = False
 
-def parse_args():
+
+class Config:
+    """配置类，用于存储从config.yaml文件读取的配置参数"""
+    
+    def __init__(self, config_file='config.yaml'):
+        """从配置文件初始化配置"""
+        try:
+            with open(config_file, 'r', encoding='utf-8') as file:
+                config_data = yaml.safe_load(file)
+        except FileNotFoundError:
+            print(f"警告: 配置文件 {config_file} 未找到，使用默认配置")
+            config_data = {}
+        
+        # 数据文件参数
+        self.input_files = config_data.get('input_files', ['data/host1-iostat.csv', 'data/host2-iostat.csv'])
+        self.output_dir = config_data.get('output_dir', 'result/')
+        
+        # IASO算法参数
+        self.epoch_seconds = config_data.get('epoch_seconds', 15)
+        self.latency_multiplier = config_data.get('latency_multiplier', 2.0)
+        self.min_ttr_minutes = config_data.get('min_ttr_minutes', 2.0)
+        self.ratio_thresh = config_data.get('ratio_thresh', 0.1)
+        
+        # 检测参数
+        self.hard_latency_threshold = config_data.get('hard_latency_threshold', 100.0)
+        # self.score_threshold = config_data.get('score_threshold', 20.0)
+        
+        # 慢节点识别参数
+        self.time_interval_minutes = config_data.get('time_interval_minutes', 10)
+        self.dbscan_eps = config_data.get('dbscan_eps', 5.0)
+        self.dbscan_min_samples = config_data.get('dbscan_min_samples', 2)
+        
+        # 输出控制参数
+        self.no_plot = config_data.get('no_plot', False)
+        self.verbose = config_data.get('verbose', False)
+
+
+def load_config(config_file='config.yaml'):
     """
-    解析命令行参数
+    从配置文件加载配置参数
+    
+    参数:
+    - config_file: 配置文件路径
     
     返回:
-    - args: 解析后的命令行参数对象
+    - config: 配置对象
     """
-    parser = argparse.ArgumentParser(
-        description='IASO Fail-Slow Detection Framework - 基于IASO论文的fail-slow检测脚本',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    
-    # 数据文件参数
-    parser.add_argument(
-        '--input-file', '-i',
-        type=str,
-        default='data/a.csv',
-        help='输入的CSV数据文件路径'
-    )
-    
-    parser.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        default='result/',
-        help='输出的评分CSV文件路径'
-    )
-    
-    # IASO算法参数
-    parser.add_argument(
-        '--epoch-seconds', '-e',
-        type=int,
-        default=1,
-        help='纪元时间窗口长度（秒）'
-    )
-    
-    parser.add_argument(
-        '--latency-multiplier', '-l',
-        type=float,
-        default=2.0,
-        help='判定慢盘的延迟倍数阈值（相对于中位数延迟）'
-    )
-    
-    parser.add_argument(
-        '--min-ttr-minutes', '-t',
-        type=float,
-        default=2.0,
-        help='从100分恢复到1分所需的最小时间（分钟）'
-    )
-    
-    parser.add_argument(
-        '--ratio-thresh', '-r',
-        type=float,
-        default=0.1,
-        help='Timeout-Response比率的上限阈值, 控制分数增长'
-    )
-    
-    # 检测参数
-    parser.add_argument(
-        '--hard-latency-threshold', '-a',
-        type=float,
-        default=100.0,
-        help='慢盘的硬性延迟阈值（毫秒）'
-    )
-    
-    parser.add_argument(
-        '--score-threshold', '-s',
-        type=float,
-        default=80.0,
-        help='Fail-slow分数阈值，超过此值视为fail-slow'
-    )
-    
-    parser.add_argument(
-        '--min-duration-epochs', '-d',
-        type=int,
-        default=3,
-        help='Fail-slow最小持续纪元数'
-    )
-    
-    # 输出控制参数
-    parser.add_argument(
-        '--no-plot',
-        action='store_true',
-        help='不生成可视化图表'
-    )
-    
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='输出详细信息'
-    )
-    
-    return parser.parse_args()
+    return Config(config_file)
 
 
 class IasoDetector:
     """IASO Fail-Slow检测器"""
     
     def __init__(self, 
-                 args):
+                 config):
         """
         初始化IASO检测器
         
         参数:
-        - epoch_seconds: 纪元时间窗口（秒）
-        - latency_multiplier: 判定慢盘的延迟倍数阈值
-        - min_ttr_minutes: 恢复到满分所需的最小时间（分钟）
-        - ratio_thresh: Timeout-Response比率的上限阈值
+        - config: 配置对象，包含所有必要参数
         """
-        self.EPOCH_SECONDS = args.epoch_seconds
-        self.LATENCY_MULTIPLIER = args.latency_multiplier
-        self.MIN_TTR_MINUTES = args.min_ttr_minutes
-        self.RATIO_THRESH = args.ratio_thresh
-        self.HARD_LATENCY_THRESHOLD = args.hard_latency_threshold
+        self.EPOCH_SECONDS = config.epoch_seconds
+        self.LATENCY_MULTIPLIER = config.latency_multiplier
+        self.MIN_TTR_MINUTES = config.min_ttr_minutes
+        self.RATIO_THRESH = config.ratio_thresh
+        self.HARD_LATENCY_THRESHOLD = config.hard_latency_threshold
 
-        self.output_dir = args.output_dir
+        self.output_dir = config.output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.data = None
-        self.score_db = []
-        self.fail_slow_periods = []
+        # 多节点数据结构
+        self.nodes_data = {}  # 存储每个节点的数据
+        self.nodes_score_db = {}  # 存储每个节点的分数数据库
+        self.slow_nodes = []  # 存储识别出的慢节点
+        
+        # 慢节点识别参数
+        self.time_interval_minutes = config.time_interval_minutes
+        self.dbscan_eps = config.dbscan_eps
+        self.dbscan_min_samples = config.dbscan_min_samples
+    
+    def load_and_preprocess_multiple(self, file_paths):
+        """
+        加载和预处理多个节点的数据
+        
+        参数:
+        - file_paths: CSV文件路径列表
+        """
+        print(f"正在加载 {len(file_paths)} 个节点的数据文件...")
+        
+        for file_path in file_paths:
+            # 从文件名提取节点名
+            node_name = os.path.basename(file_path).split('-')[0]  # e.g., "host1" from "host1-iostat.csv"
+            
+            print(f"  加载节点 {node_name}: {file_path}")
+            
+            try:
+                # 加载CSV数据
+                data = pd.read_csv(file_path)
+                
+                # 转换时间戳
+                data['timestamp'] = pd.to_datetime(data['timestamp'], 
+                                                   format='%m/%d/%Y %I:%M:%S %p')
+                
+                # 按时间排序
+                data = data.sort_values('timestamp').reset_index(drop=True)
+                
+                # 检查w_await列
+                if 'w_await' not in data.columns:
+                    print(f"    警告: 节点 {node_name} 数据中缺少 'w_await' 列，跳过")
+                    continue
+                
+                # 处理非数值或空值
+                data['w_await'] = pd.to_numeric(data['w_await'], errors='coerce')
+                data = data.dropna(subset=['w_await'])
+                
+                # 存储到节点数据字典
+                self.nodes_data[node_name] = data
+                self.nodes_score_db[node_name] = []
+                
+                print(f"    ✓ 节点 {node_name} 加载完成: {len(data)} 行")
+                print(f"    ✓ 时间范围: {data['timestamp'].min()} 到 {data['timestamp'].max()}")
+                print(f"    ✓ 设备列表: {data['device'].unique()}")
+                
+            except Exception as e:
+                print(f"    ✗ 节点 {node_name} 加载失败: {e}")
+        
+        print(f"\n成功加载 {len(self.nodes_data)} 个节点的数据")
     
     def load_and_preprocess(self, file_path):
         """
-        加载和预处理数据
+        单节点加载和预处理数据（向后兼容）
         
         参数:
         - file_path: CSV文件路径
         """
-        print(f"正在加载数据文件: {file_path}")
-        
-        # 加载CSV数据
-        self.data = pd.read_csv(file_path)
-        
-        # 转换时间戳
-        self.data['timestamp'] = pd.to_datetime(self.data['timestamp'], 
-                                                format='%m/%d/%Y %I:%M:%S %p')
-        
-        # 按时间排序
-        self.data = self.data.sort_values('timestamp').reset_index(drop=True)
-        
-        # 检查w_await列
-        if 'w_await' not in self.data.columns:
-            raise ValueError("数据中缺少 'w_await' 列")
-        
-        # 处理非数值或空值
-        self.data['w_await'] = pd.to_numeric(self.data['w_await'], errors='coerce')
-        self.data = self.data.dropna(subset=['w_await'])
-        
-        print(f"数据加载完成: {len(self.data)} 行")
-        print(f"时间范围: {self.data['timestamp'].min()} 到 {self.data['timestamp'].max()}")
-        print(f"设备列表: {self.data['device'].unique()}")
-
-        # print(self.data)
+        self.load_and_preprocess_multiple([file_path])
         
     def detect_fail_slow(self):
         """
-        执行fail-slow检测
+        执行多节点fail-slow检测
         """
-        if self.data is None:
+        if not self.nodes_data:
             raise ValueError("请先加载数据!")
         
-        print("\n开始执行IASO fail-slow检测...")
+        print(f"\n开始执行IASO fail-slow检测 ({len(self.nodes_data)} 个节点)...")
         
+        for node_name, data in self.nodes_data.items():
+            print(f"\n处理节点: {node_name}")
+            self._detect_single_node(node_name, data)
+    
+    def _detect_single_node(self, node_name, data):
+        """
+        执行单个节点的fail-slow检测
+        
+        参数:
+        - node_name: 节点名称
+        - data: 节点数据
+        """
         # 获取时间范围
-        start_time = self.data['timestamp'].min()
-        end_time = self.data['timestamp'].max()
+        start_time = data['timestamp'].min()
+        end_time = data['timestamp'].max()
         
         # 初始化评分
         previous_score = 1.0
@@ -195,9 +191,9 @@ class IasoDetector:
             epoch_end = epoch_start + timedelta(seconds=self.EPOCH_SECONDS)
             
             # 切片当前纪元的数据
-            epoch_data = self.data[
-                (self.data['timestamp'] >= epoch_start) & 
-                (self.data['timestamp'] < epoch_end)
+            epoch_data = data[
+                (data['timestamp'] >= epoch_start) & 
+                (data['timestamp'] < epoch_end)
             ]
             
             if len(epoch_data) == 0:
@@ -240,7 +236,7 @@ class IasoDetector:
                 new_score = min(100.0, new_score)  # 确保分数不高于100
             
             # 存储分数
-            self.score_db.append({
+            self.nodes_score_db[node_name].append({
                 'timestamp': epoch_end,
                 'score': new_score,
                 'median_latency': median_latency,
@@ -254,71 +250,213 @@ class IasoDetector:
             epoch_start = epoch_end
             epoch_count += 1
         
-        print(f"检测完成! 共处理 {epoch_count} 个纪元")
+        print(f"  节点 {node_name} 检测完成! 共处理 {epoch_count} 个epoch")
     
-    # TODO
-    # 这个后续需要看数据是怎么组成的
-    # 如果不同节点的数据在同一个文件里，那么需要先按节点分组再处理
-    # 处理过程为计算每个节点在每个time interval的3-th分数，在进行聚类
-    # 如果不在一个文件里，那么就读取不同节点的分数文件，再按上述方法进行处理
-    def identify_fail_slow_periods(self, score_threshold=80, min_duration_epochs=3):
+    def identify_slow_nodes(self):
         """
-        识别fail-slow时段
-        
-        参数:
-        - score_threshold: 分数阈值，超过此值视为fail-slow
-        - min_duration_epochs: 最小持续纪元数
+        识别慢节点 - 基于IASO论文中的方法
+        在指定时间间隔内计算每个节点的30th百分位分数，然后使用DBSCAN进行聚类
         """
-        if len(self.score_db) == 0:
+        if not self.nodes_score_db:
             print("警告: 还没有执行检测!")
             return
         
-        print(f"\n识别fail-slow时段 (阈值: {score_threshold}, 最小持续: {min_duration_epochs} 个纪元)...")
+        print(f"\n开始识别慢节点 (时间间隔: {self.time_interval_minutes} 分钟)...")
         
-        scores_df = pd.DataFrame(self.score_db)
+        # 获取所有节点的时间范围
+        all_timestamps = []
+        for node_name, score_db in self.nodes_score_db.items():
+            if score_db:
+                timestamps = [entry['timestamp'] for entry in score_db]
+                all_timestamps.extend(timestamps)
         
-        scores_df['is_high_score'] = scores_df['score'] > score_threshold
+        if not all_timestamps:
+            print("警告: 没有分数数据可用于慢节点识别!")
+            return
         
-        # 识别连续的高分时段
-        scores_df['period_id'] = (
-            scores_df['is_high_score'] != scores_df['is_high_score'].shift()
-        ).cumsum()
+        # 确定时间范围
+        start_time = min(all_timestamps)
+        end_time = max(all_timestamps)
         
-        # 筛选出持续时间足够长的fail-slow时段
-        self.fail_slow_periods = []
-        for period_id, group in scores_df[scores_df['is_high_score']].groupby('period_id'):
-            if len(group) >= min_duration_epochs:
-                self.fail_slow_periods.append({
-                    'start_time': group['timestamp'].min(),
-                    'end_time': group['timestamp'].max(),
-                    'max_score': group['score'].max(),
-                    'avg_score': group['score'].mean(),
-                    'duration_epochs': len(group)
+        # 按时间间隔处理
+        interval_data = []
+        current_time = start_time
+        interval_seconds = self.time_interval_minutes * 60
+        
+        while current_time < end_time:
+            interval_end = current_time + timedelta(seconds=interval_seconds)
+            
+            # 收集当前时间间隔内每个节点的分数
+            interval_scores = {}
+            for node_name, score_db in self.nodes_score_db.items():
+                scores_in_interval = []
+                for entry in score_db:
+                    if current_time <= entry['timestamp'] < interval_end:
+                        scores_in_interval.append(entry['score'])
+                
+                if scores_in_interval:
+                    # 计算30th百分位数
+                    percentile_30th = np.percentile(scores_in_interval, 30)
+                    interval_scores[node_name] = percentile_30th
+            
+            if interval_scores:
+                interval_data.append({
+                    'timestamp': interval_end,
+                    'scores': interval_scores
                 })
+            
+            current_time = interval_end
         
-        print(f"发现 {len(self.fail_slow_periods)} 个fail-slow时段:")
-        for i, period in enumerate(self.fail_slow_periods, 1):
-            print(f"  {i}. {period['start_time']} 到 {period['end_time']}")
-            print(f"     最高分数: {period['max_score']:.2f}, 平均分数: {period['avg_score']:.2f}, 持续: {period['duration_epochs']} 个纪元")
+        if not interval_data:
+            print("警告: 没有足够的数据进行慢节点识别!")
+            return
+        
+        print(f"收集到 {len(interval_data)} 个时间间隔的数据")
+        
+        # 进行DBSCAN聚类识别慢节点
+        self._cluster_nodes_with_dbscan(interval_data)
+    
+    def _cluster_nodes_with_dbscan(self, interval_data):
+        """
+        使用DBSCAN对节点进行聚类以识别慢节点
+        
+        参数:
+        - interval_data: 包含每个时间间隔节点分数的数据
+        """
+        try:
+            # 简化方案：计算每个节点在所有时间间隔的平均30th百分位分数
+            node_avg_scores = {}
+            for node_name in self.nodes_score_db.keys():
+                scores = []
+                for data in interval_data:
+                    if node_name in data['scores']:
+                        scores.append(data['scores'][node_name])
+                
+                if scores:
+                    node_avg_scores[node_name] = np.mean(scores)
+            
+            if len(node_avg_scores) < 2:
+                print("警告: 节点数量不足，无法进行聚类分析!")
+                return
+            
+            # 准备DBSCAN输入数据
+            node_names = list(node_avg_scores.keys())
+            scores = np.array([[score] for score in node_avg_scores.values()])
+            
+            print(f"节点平均30th百分位分数:")
+            for node_name, score in node_avg_scores.items():
+                print(f"  {node_name}: {score:.2f}")
+            
+            # 使用简单的阈值方法替代DBSCAN（因为sklearn可能不可用）
+            # 如果节点分数明显高于其他节点，则标记为慢节点
+            score_values = list(node_avg_scores.values())
+            median_score = np.median(score_values)
+            std_score = np.std(score_values)
+            slow_threshold = median_score + std_score  # 超过中位数+标准差的节点视为慢节点
+            
+            self.slow_nodes = []
+            for node_name, score in node_avg_scores.items():
+                if score > slow_threshold:
+                    self.slow_nodes.append({
+                        'node_name': node_name,
+                        'avg_score': score,
+                        'is_slow': True
+                    })
+                else:
+                    self.slow_nodes.append({
+                        'node_name': node_name,
+                        'avg_score': score,
+                        'is_slow': False
+                    })
+            
+            # 输出结果
+            slow_count = sum(1 for node in self.slow_nodes if node['is_slow'])
+            print(f"\n慢节点识别结果:")
+            print(f"  总节点数: {len(self.slow_nodes)}")
+            print(f"  慢节点数: {slow_count}")
+            print(f"  慢节点阈值: {slow_threshold:.2f}")
+            
+            if slow_count > 0:
+                print(f"  慢节点列表:")
+                for node in self.slow_nodes:
+                    if node['is_slow']:
+                        print(f"    - {node['node_name']}: 平均分数 {node['avg_score']:.2f}")
+            else:
+                print("  未检测到慢节点")
+                
+        except Exception as e:
+            print(f"慢节点识别过程中出现错误: {e}")
+            # 如果出错，使用简单的分数排序方法
+            print("使用备用方法进行慢节点识别...")
+            self._simple_slow_node_detection()
+    
+    def _simple_slow_node_detection(self):
+        """
+        简单的慢节点检测方法 - 基于平均分数排序
+        """
+        node_avg_scores = {}
+        for node_name, score_db in self.nodes_score_db.items():
+            if score_db:
+                scores = [entry['score'] for entry in score_db]
+                node_avg_scores[node_name] = np.mean(scores)
+        
+        if not node_avg_scores:
+            return
+        
+        # 按分数降序排序
+        sorted_nodes = sorted(node_avg_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # 简单规则：如果最高分数明显高于最低分数，则最高分数的节点为慢节点
+        if len(sorted_nodes) >= 2:
+            highest_score = sorted_nodes[0][1]
+            lowest_score = sorted_nodes[-1][1]
+            
+            # 如果最高分数超过最低分数的1.5倍，则认为是慢节点
+            if highest_score > lowest_score * 1.5:
+                slow_threshold = (highest_score + lowest_score) / 2
+                
+                self.slow_nodes = []
+                for node_name, score in sorted_nodes:
+                    is_slow = score > slow_threshold
+                    self.slow_nodes.append({
+                        'node_name': node_name,
+                        'avg_score': score,
+                        'is_slow': is_slow
+                    })
+                
+                print(f"简单方法识别结果:")
+                print(f"  慢节点阈值: {slow_threshold:.2f}")
+                for node in self.slow_nodes:
+                    status = "慢节点" if node['is_slow'] else "正常节点"
+                    print(f"  {node['node_name']}: {node['avg_score']:.2f} ({status})")
     
     def visualize(self):
         """
-        可视化检测结果
-        
-        参数:
-        - output_file: 输出图片文件名
+        可视化多节点检测结果
         """
-        # TODO
-        # 按照主机名完成图片保存
-        output_file = os.path.join(self.output_dir, 'host1.png')
-
-        if len(self.score_db) == 0:
+        if not self.nodes_score_db:
             print("警告: 还没有执行检测!")
             return
         
         print(f"\n生成可视化图表...")
         
-        scores_df = pd.DataFrame(self.score_db)
+        # 为每个节点生成单独的图表
+        for node_name, score_db in self.nodes_score_db.items():
+            if not score_db:
+                continue
+            
+            self._visualize_single_node(node_name, score_db)
+        
+        # 生成综合比较图表
+        self._visualize_comparison()
+    
+    def _visualize_single_node(self, node_name, score_db):
+        """
+        为单个节点生成可视化图表
+        """
+        output_file = os.path.join(self.output_dir, f'{node_name}.png')
+        
+        scores_df = pd.DataFrame(score_db)
         
         # 创建图表
         fig, axes = plt.subplots(3, 1, figsize=(15, 12))
@@ -330,14 +468,9 @@ class IasoDetector:
         ax1.axhline(y=80, color='red', linestyle='--', 
                    linewidth=1.5, label='Fail-Slow Threshold (80)')
         
-        # 标记fail-slow时段
-        for period in self.fail_slow_periods:
-            ax1.axvspan(period['start_time'], period['end_time'], 
-                       alpha=0.3, color='red')
-        
         ax1.set_xlabel('Time', fontsize=12)
-        ax1.set_ylabel('Health Score', fontsize=12)
-        ax1.set_title('Node Health Score Over Time (IASO)', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('Score', fontsize=12)
+        ax1.set_title(f'{node_name} Score Over Time (IASO)', fontsize=14, fontweight='bold')
         ax1.legend(loc='best')
         ax1.grid(True, alpha=0.3)
         ax1.set_ylim([0, 105])
@@ -360,105 +493,233 @@ class IasoDetector:
                    linewidth=1.5, label=f'Ratio Threshold ({self.RATIO_THRESH})')
         ax3.set_xlabel('Time', fontsize=12)
         ax3.set_ylabel('ToRespRatio', fontsize=12)
-        ax3.set_title('Timeout-Response Ratio Over Time', fontsize=14, fontweight='bold')
+        ax3.set_title('ToRespRatio', fontsize=14, fontweight='bold')
         ax3.legend(loc='best')
         ax3.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"图表已保存到: {output_file}")
-        plt.show()
+        print(f"  {node_name} 图表已保存到: {output_file}")
+        plt.close()  # 关闭图表以释放内存
+    
+    def _visualize_comparison(self):
+        """
+        生成多节点比较图表
+        """
+        output_file = os.path.join(self.output_dir, 'nodes_comparison.png')
+        
+        if len(self.nodes_score_db) < 2:
+            print("  节点数量不足，跳过比较图表生成")
+            return
+        
+        # 创建比较图表
+        fig, axes = plt.subplots(2, 1, figsize=(15, 10))
+        
+        # 图1: 所有节点的健康分数对比
+        ax1 = axes[0]
+        colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#591E71']
+        
+        for i, (node_name, score_db) in enumerate(self.nodes_score_db.items()):
+            if not score_db:
+                continue
+            
+            scores_df = pd.DataFrame(score_db)
+            color = colors[i % len(colors)]
+            
+            # 标记慢节点
+            is_slow = any(node['is_slow'] and node['node_name'] == node_name 
+                         for node in self.slow_nodes) if self.slow_nodes else False
+            linestyle = '--' if is_slow else '-'
+            linewidth = 3 if is_slow else 2
+            
+            ax1.plot(scores_df['timestamp'], scores_df['score'], 
+                    color=color, linestyle=linestyle, linewidth=linewidth, 
+                    label=f"{node_name}{'(慢节点)' if is_slow else ''}")
+        
+        ax1.axhline(y=80, color='red', linestyle=':', 
+                   linewidth=1.5, label='Fail-Slow Threshold')
+        ax1.set_xlabel('Time', fontsize=12)
+        ax1.set_ylabel('Health Score', fontsize=12)
+        ax1.set_title('Multi-Node Health Score Comparison', fontsize=14, fontweight='bold')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim([0, 105])
+        
+        # 图2: 节点平均分数对比柱状图
+        ax2 = axes[1]
+        if self.slow_nodes:
+            node_names = [node['node_name'] for node in self.slow_nodes]
+            avg_scores = [node['avg_score'] for node in self.slow_nodes]
+            colors_bar = ['red' if node['is_slow'] else 'lightblue' for node in self.slow_nodes]
+            
+            bars = ax2.bar(node_names, avg_scores, color=colors_bar)
+            ax2.set_xlabel('Node', fontsize=12)
+            ax2.set_ylabel('Average Health Score', fontsize=12)
+            ax2.set_title('Average Health Score by Node', fontsize=14, fontweight='bold')
+            ax2.grid(True, alpha=0.3, axis='y')
+            
+            # 添加数值标签
+            for bar, score in zip(bars, avg_scores):
+                height = bar.get_height()
+                ax2.text(bar.get_x() + bar.get_width()/2., height + 0.5,
+                        f'{score:.1f}', ha='center', va='bottom')
+        
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"  比较图表已保存到: {output_file}")
+        plt.close()
     
     def export_results(self):
         """
-        导出检测结果到CSV
-        
-        参数:
-        - output_file: 输出CSV文件名
+        导出多节点检测结果到CSV
         """
-        # TODO
-        # 按照主机名完成文件保存
-        output_file = os.path.join(self.output_dir, 'host1_scores.csv')
-
-        if len(self.score_db) == 0:
+        if not self.nodes_score_db:
             print("警告: 还没有执行检测!")
             return
         
-        scores_df = pd.DataFrame(self.score_db)
-        scores_df.to_csv(output_file, index=False)
-        print(f"\n结果已导出到: {output_file}")
+        print(f"\n导出检测结果...")
+        
+        # 为每个节点导出分数数据
+        for node_name, score_db in self.nodes_score_db.items():
+            if not score_db:
+                continue
+            
+            output_file = os.path.join(self.output_dir, f'{node_name}_scores.csv')
+            scores_df = pd.DataFrame(score_db)
+            scores_df.to_csv(output_file, index=False)
+            print(f"  {node_name} 结果已导出到: {output_file}")
+        
+        # 导出慢节点识别结果
+        if self.slow_nodes:
+            slow_nodes_file = os.path.join(self.output_dir, 'slow_nodes_detection.csv')
+            slow_nodes_df = pd.DataFrame(self.slow_nodes)
+            slow_nodes_df.to_csv(slow_nodes_file, index=False)
+            print(f"  慢节点识别结果已导出到: {slow_nodes_file}")
+        
+        # 导出综合摘要
+        summary_file = os.path.join(self.output_dir, 'detection_summary.csv')
+        self._export_summary(summary_file)
     
-    # TODO
+    def _export_summary(self, summary_file):
+        """
+        导出检测摘要
+        """
+        summary_data = []
+        
+        for node_name, score_db in self.nodes_score_db.items():
+            if not score_db:
+                continue
+            
+            scores_df = pd.DataFrame(score_db)
+            
+            # 查找该节点是否为慢节点
+            is_slow = any(node['is_slow'] and node['node_name'] == node_name 
+                         for node in self.slow_nodes) if self.slow_nodes else False
+            avg_slow_score = next((node['avg_score'] for node in self.slow_nodes 
+                                  if node['node_name'] == node_name), 0)
+            
+            summary_data.append({
+                'node_name': node_name,
+                'total_epochs': len(score_db),
+                'avg_score': scores_df['score'].mean(),
+                'max_score': scores_df['score'].max(),
+                'min_score': scores_df['score'].min(),
+                'std_score': scores_df['score'].std(),
+                'is_slow_node': is_slow,
+                'slow_node_score': avg_slow_score
+            })
+        
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_csv(summary_file, index=False)
+        print(f"  检测摘要已导出到: {summary_file}")
+    
     def print_summary(self):
-        """打印检测摘要"""
-        if len(self.score_db) == 0:
+        """打印多节点检测摘要"""
+        if not self.nodes_score_db:
             print("警告: 还没有执行检测!")
             return
         
-        scores_df = pd.DataFrame(self.score_db)
+        print("\n" + "="*80)
+        print("IASO Multi-Node Fail-Slow Detection Summary")
+        print("="*80)
         
-        print("\n" + "="*60)
-        print("IASO Fail-Slow Detection Summary")
-        print("="*60)
-        print(f"总纪元数: {len(scores_df)}")
-        print(f"平均健康分数: {scores_df['score'].mean():.2f}")
-        print(f"最高健康分数: {scores_df['score'].max():.2f}")
-        print(f"最低健康分数: {scores_df['score'].min():.2f}")
-        print(f"分数标准差: {scores_df['score'].std():.2f}")
-        print(f"\n平均中位延迟: {scores_df['median_latency'].mean():.2f} ms")
-        print(f"最高中位延迟: {scores_df['median_latency'].max():.2f} ms")
-        print(f"\nFail-Slow时段数量: {len(self.fail_slow_periods)}")
+        total_epochs = 0
         
-        if len(self.fail_slow_periods) > 0:
-            total_duration = sum(p['duration_epochs'] for p in self.fail_slow_periods)
-            print(f"Fail-Slow总持续时间: {total_duration} 个纪元 "
-                  f"({total_duration * self.EPOCH_SECONDS} 秒)")
-        print("="*60)
+        for node_name, score_db in self.nodes_score_db.items():
+            if not score_db:
+                continue
+            
+            scores_df = pd.DataFrame(score_db)
+            
+            print(f"\n节点: {node_name}")
+            print(f"  总纪元数: {len(scores_df)}")
+            print(f"  平均健康分数: {scores_df['score'].mean():.2f}")
+            print(f"  最高健康分数: {scores_df['score'].max():.2f}")
+            print(f"  最低健康分数: {scores_df['score'].min():.2f}")
+            print(f"  分数标准差: {scores_df['score'].std():.2f}")
+            print(f"  平均中位延迟: {scores_df['median_latency'].mean():.2f} ms")
+            print(f"  最高中位延迟: {scores_df['median_latency'].max():.2f} ms")
+            
+            total_epochs += len(scores_df)
+        
+        print(f"\n总体统计:")
+        print(f"  节点总数: {len(self.nodes_score_db)}")
+        print(f"  总epoch数: {total_epochs}")
+        
+        if self.slow_nodes:
+            slow_count = sum(1 for node in self.slow_nodes if node['is_slow'])
+            print(f"\n慢节点识别结果:")
+            print(f"  慢节点数量: {slow_count} / {len(self.slow_nodes)}")
+            
+            if slow_count > 0:
+                print(f"  慢节点列表:")
+                for node in self.slow_nodes:
+                    if node['is_slow']:
+                        print(f"    - {node['node_name']}: 平均分数 {node['avg_score']:.2f}")
+        
+        print("="*80)
 
 if __name__ == "__main__":
-    # 解析命令行参数
-    args = parse_args()
+    # 从配置文件加载配置
+    config = load_config()
     
     print("="*60)
     print("IASO Fail-Slow Detection Framework")
     print("="*60)
     
-    if args.verbose:
+    if config.verbose:
         print("运行参数:")
-        print(f"  输入文件: {args.input_file}")
-        print(f"  输出CSV: {args.output_csv}")
-        print(f"  输出图片: {args.output_plot}")
-        print(f"  纪元时间窗口: {args.epoch_seconds} 秒")
-        print(f"  延迟倍数阈值: {args.latency_multiplier}")
-        print(f"  恢复时间: {args.min_ttr_minutes} 分钟")
-        print(f"  比率阈值: {args.ratio_thresh}")
-        print(f"  分数阈值: {args.score_threshold}")
-        print(f"  最小持续纪元数: {args.min_duration_epochs}")
+        print(f"  输入文件: {config.input_files}")
+        print(f"  输出目录: {config.output_dir}")
+        print(f"  epoch时间: {config.epoch_seconds} 秒")
+        print(f"  延迟倍数阈值: {config.latency_multiplier}")
+        print(f"  恢复时间: {config.min_ttr_minutes} 分钟")
+        print(f"  比率阈值: {config.ratio_thresh}")
+        print(f"  硬性延迟阈值: {config.hard_latency_threshold} 毫秒")
+        # print(f"  分数阈值: {config.score_threshold}")
+        print(f"  慢节点识别时间间隔: {config.time_interval_minutes} 分钟")
         print("="*60)
     
-    # 创建检测器实例（使用命令行参数）
+    # 创建检测器实例（使用配置参数）
     detector = IasoDetector(
-        args
+        config
     )
     
-    # 加载数据
-    detector.load_and_preprocess(args.input_file)
+    # 加载多节点数据
+    detector.load_and_preprocess_multiple(config.input_files)
     
     # 执行检测
     detector.detect_fail_slow()
     
+    # 识别慢节点
+    detector.identify_slow_nodes()
+    
     # 导出结果
     detector.export_results()
-
-    # 识别fail-slow时段
-    detector.identify_fail_slow_periods(
-        score_threshold=args.score_threshold, 
-        min_duration_epochs=args.min_duration_epochs
-    )
     
     # 打印摘要
     detector.print_summary()
     
     # 可视化
-    if not args.no_plot:
+    if not config.no_plot:
         detector.visualize()

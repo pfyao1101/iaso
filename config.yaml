@@ -1,0 +1,24 @@
+# 数据文件参数
+input_files:  # 多个节点的输入CSV数据文件路径
+  - 'data/host1-iostat.csv'
+  - 'data/host2-iostat.csv'
+output_dir: 'result/'  # 输出目录路径
+
+# IASO算法参数
+epoch_seconds: 15  # 纪元时间窗口长度（秒）- Perseus中设置为15
+latency_multiplier: 2.0  # 判定慢盘的延迟倍数阈值（相对于中位数延迟）
+min_ttr_minutes: 3.0  # 从100分恢复到1分所需的最小时间（分钟）
+ratio_thresh: 0.1  # Timeout-Response比率的上限阈值, 控制分数增长
+
+# 检测参数
+hard_latency_threshold: 20.0  # 慢盘的硬性延迟阈值（毫秒）
+score_threshold: 80.0  # Fail-slow分数阈值，超过此值视为fail-slow - 需要根据系统的延迟进行设计
+
+# 慢节点识别参数
+time_interval_minutes: 10  # 计算30th百分位分数的时间间隔（分钟）
+dbscan_eps: 5.0  # DBSCAN聚类的eps参数
+dbscan_min_samples: 2  # DBSCAN聚类的最小样本数
+
+# 输出控制参数
+no_plot: false  # 不生成可视化图表
+verbose: true  # 输出详细信息
