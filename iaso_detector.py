@@ -33,7 +33,7 @@ class Config:
             config_data = {}
         
         # 数据文件参数
-        self.input_files = config_data.get('input_files', ['data/host1-iostat.csv', 'data/host2-iostat.csv'])
+        self.input_files = config_data.get('input_files', ['data/host1-iostat.csv'])
         self.output_dir = config_data.get('output_dir', 'result/')
         
         # IASO算法参数
@@ -146,15 +146,6 @@ class IasoDetector:
                 print(f"    ✗ 节点 {node_name} 加载失败: {e}")
         
         print(f"\n成功加载 {len(self.nodes_data)} 个节点的数据")
-    
-    def load_and_preprocess(self, file_path):
-        """
-        单节点加载和预处理数据（向后兼容）
-        
-        参数:
-        - file_path: CSV文件路径
-        """
-        self.load_and_preprocess_multiple([file_path])
         
     def detect_fail_slow(self):
         """
@@ -171,7 +162,7 @@ class IasoDetector:
     
     def _detect_single_node(self, node_name, data):
         """
-        执行单个节点的fail-slow检测
+        执行单个节点的fail-slow分数计算
         
         参数:
         - node_name: 节点名称
@@ -252,6 +243,8 @@ class IasoDetector:
         
         print(f"  节点 {node_name} 检测完成! 共处理 {epoch_count} 个epoch")
     
+    # TODO
+    # 需要检查当前函数和他所调用的函数的逻辑是否正确
     def identify_slow_nodes(self):
         """
         识别慢节点 - 基于IASO论文中的方法
@@ -430,6 +423,7 @@ class IasoDetector:
                     status = "慢节点" if node['is_slow'] else "正常节点"
                     print(f"  {node['node_name']}: {node['avg_score']:.2f} ({status})")
     
+    
     def visualize(self):
         """
         可视化多节点检测结果
@@ -588,22 +582,10 @@ class IasoDetector:
             scores_df = pd.DataFrame(score_db)
             scores_df.to_csv(output_file, index=False)
             print(f"  {node_name} 结果已导出到: {output_file}")
-        
-        # 导出慢节点识别结果
-        if self.slow_nodes:
-            slow_nodes_file = os.path.join(self.output_dir, 'slow_nodes_detection.csv')
-            slow_nodes_df = pd.DataFrame(self.slow_nodes)
-            slow_nodes_df.to_csv(slow_nodes_file, index=False)
-            print(f"  慢节点识别结果已导出到: {slow_nodes_file}")
+    
         
         # 导出综合摘要
         summary_file = os.path.join(self.output_dir, 'detection_summary.csv')
-        self._export_summary(summary_file)
-    
-    def _export_summary(self, summary_file):
-        """
-        导出检测摘要
-        """
         summary_data = []
         
         for node_name, score_db in self.nodes_score_db.items():
@@ -626,7 +608,7 @@ class IasoDetector:
                 'min_score': scores_df['score'].min(),
                 'std_score': scores_df['score'].std(),
                 'is_slow_node': is_slow,
-                'slow_node_score': avg_slow_score
+                # 'slow_node_score': avg_slow_score
             })
         
         summary_df = pd.DataFrame(summary_data)
