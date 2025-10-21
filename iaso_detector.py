@@ -533,8 +533,8 @@ class IasoDetector:
         ax1.axhline(y=80, color='red', linestyle=':', 
                    linewidth=1.5, label='Fail-Slow Threshold')
         ax1.set_xlabel('Time', fontsize=12)
-        ax1.set_ylabel('Health Score', fontsize=12)
-        ax1.set_title('Multi-Node Health Score Comparison', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('Score', fontsize=12)
+        ax1.set_title('Multi-Node Score Comparison', fontsize=14, fontweight='bold')
         ax1.legend(loc='best')
         ax1.grid(True, alpha=0.3)
         ax1.set_ylim([0, 105])
@@ -548,8 +548,8 @@ class IasoDetector:
             
             bars = ax2.bar(node_names, avg_scores, color=colors_bar)
             ax2.set_xlabel('Node', fontsize=12)
-            ax2.set_ylabel('Average Health Score', fontsize=12)
-            ax2.set_title('Average Health Score by Node', fontsize=14, fontweight='bold')
+            ax2.set_ylabel('Average Score', fontsize=12)
+            ax2.set_title('Average Score by Node', fontsize=14, fontweight='bold')
             ax2.grid(True, alpha=0.3, axis='y')
             
             # 添加数值标签
@@ -635,9 +635,9 @@ class IasoDetector:
             
             print(f"\n节点: {node_name}")
             print(f"  总纪元数: {len(scores_df)}")
-            print(f"  平均健康分数: {scores_df['score'].mean():.2f}")
-            print(f"  最高健康分数: {scores_df['score'].max():.2f}")
-            print(f"  最低健康分数: {scores_df['score'].min():.2f}")
+            print(f"  平均分数: {scores_df['score'].mean():.2f}")
+            print(f"  最高分数: {scores_df['score'].max():.2f}")
+            print(f"  最低分数: {scores_df['score'].min():.2f}")
             print(f"  分数标准差: {scores_df['score'].std():.2f}")
             print(f"  平均中位延迟: {scores_df['median_latency'].mean():.2f} ms")
             print(f"  最高中位延迟: {scores_df['median_latency'].max():.2f} ms")
