@@ -267,6 +267,8 @@ class IasoDetector:
             print("警告: 没有分数数据可用于慢节点识别!")
             return
         
+        print(all_timestamps)
+
         # 确定时间范围
         start_time = min(all_timestamps)
         end_time = max(all_timestamps)
@@ -303,7 +305,9 @@ class IasoDetector:
         if not interval_data:
             print("警告: 没有足够的数据进行慢节点识别!")
             return
-        
+
+        print(interval_data)
+
         print(f"收集到 {len(interval_data)} 个时间间隔的数据")
         
         # 进行DBSCAN聚类识别慢节点
@@ -316,113 +320,65 @@ class IasoDetector:
         参数:
         - interval_data: 包含每个时间间隔节点分数的数据
         """
-        try:
-            # 简化方案：计算每个节点在所有时间间隔的平均30th百分位分数
-            node_avg_scores = {}
-            for node_name in self.nodes_score_db.keys():
-                scores = []
-                for data in interval_data:
-                    if node_name in data['scores']:
-                        scores.append(data['scores'][node_name])
-                
-                if scores:
-                    node_avg_scores[node_name] = np.mean(scores)
-            
-            if len(node_avg_scores) < 2:
-                print("警告: 节点数量不足，无法进行聚类分析!")
-                return
-            
-            # 准备DBSCAN输入数据
-            node_names = list(node_avg_scores.keys())
-            scores = np.array([[score] for score in node_avg_scores.values()])
-            
-            print(f"节点平均30th百分位分数:")
-            for node_name, score in node_avg_scores.items():
-                print(f"  {node_name}: {score:.2f}")
-            
-            # 使用简单的阈值方法替代DBSCAN（因为sklearn可能不可用）
-            # 如果节点分数明显高于其他节点，则标记为慢节点
-            score_values = list(node_avg_scores.values())
-            median_score = np.median(score_values)
-            std_score = np.std(score_values)
-            slow_threshold = median_score + std_score  # 超过中位数+标准差的节点视为慢节点
-            
-            self.slow_nodes = []
-            for node_name, score in node_avg_scores.items():
-                if score > slow_threshold:
-                    self.slow_nodes.append({
-                        'node_name': node_name,
-                        'avg_score': score,
-                        'is_slow': True
-                    })
-                else:
-                    self.slow_nodes.append({
-                        'node_name': node_name,
-                        'avg_score': score,
-                        'is_slow': False
-                    })
-            
-            # 输出结果
-            slow_count = sum(1 for node in self.slow_nodes if node['is_slow'])
-            print(f"\n慢节点识别结果:")
-            print(f"  总节点数: {len(self.slow_nodes)}")
-            print(f"  慢节点数: {slow_count}")
-            print(f"  慢节点阈值: {slow_threshold:.2f}")
-            
-            if slow_count > 0:
-                print(f"  慢节点列表:")
-                for node in self.slow_nodes:
-                    if node['is_slow']:
-                        print(f"    - {node['node_name']}: 平均分数 {node['avg_score']:.2f}")
-            else:
-                print("  未检测到慢节点")
-                
-        except Exception as e:
-            print(f"慢节点识别过程中出现错误: {e}")
-            # 如果出错，使用简单的分数排序方法
-            print("使用备用方法进行慢节点识别...")
-            self._simple_slow_node_detection()
-    
-    def _simple_slow_node_detection(self):
-        """
-        简单的慢节点检测方法 - 基于平均分数排序
-        """
         node_avg_scores = {}
-        for node_name, score_db in self.nodes_score_db.items():
-            if score_db:
-                scores = [entry['score'] for entry in score_db]
-                node_avg_scores[node_name] = np.mean(scores)
-        
-        if not node_avg_scores:
-            return
-        
-        # 按分数降序排序
-        sorted_nodes = sorted(node_avg_scores.items(), key=lambda x: x[1], reverse=True)
-        
-        # 简单规则：如果最高分数明显高于最低分数，则最高分数的节点为慢节点
-        if len(sorted_nodes) >= 2:
-            highest_score = sorted_nodes[0][1]
-            lowest_score = sorted_nodes[-1][1]
+        for node_name in self.nodes_score_db.keys():
+            scores = []
+            for data in interval_data:
+                if node_name in data['scores']:
+                    scores.append(data['scores'][node_name])
             
-            # 如果最高分数超过最低分数的1.5倍，则认为是慢节点
-            if highest_score > lowest_score * 1.5:
-                slow_threshold = (highest_score + lowest_score) / 2
+            if scores:
+                node_avg_scores[node_name] = np.mean(scores)
+            
+        if len(node_avg_scores) < 2:
+            print("警告: 节点数量不足，无法进行聚类分析!")
+            return
+            
+        # 准备DBSCAN输入数据
+        node_names = list(node_avg_scores.keys())
+        scores = np.array([[score] for score in node_avg_scores.values()])
+            
+        print(f"节点平均30th百分位分数:")
+        for node_name, score in node_avg_scores.items():
+            print(f"  {node_name}: {score:.2f}")
+            
+        # 使用简单的阈值方法替代DBSCAN（因为sklearn可能不可用）
+        # 如果节点分数明显高于其他节点，则标记为慢节点
+        score_values = list(node_avg_scores.values())
+        median_score = np.median(score_values)
+        std_score = np.std(score_values)
+        slow_threshold = median_score + std_score  # 超过中位数+标准差的节点视为慢节点
+            
+        self.slow_nodes = []
+        for node_name, score in node_avg_scores.items():
+            if score > slow_threshold:
+                self.slow_nodes.append({
+                    'node_name': node_name,
+                    'avg_score': score,
+                    'is_slow': True
+                })
+            else:
+                self.slow_nodes.append({
+                    'node_name': node_name,
+                    'avg_score': score,
+                    'is_slow': False
+                })
+            
+        # 输出结果
+        slow_count = sum(1 for node in self.slow_nodes if node['is_slow'])
+        print(f"\n慢节点识别结果:")
+        print(f"  总节点数: {len(self.slow_nodes)}")
+        print(f"  慢节点数: {slow_count}")
+        print(f"  慢节点阈值: {slow_threshold:.2f}")
+            
+        if slow_count > 0:
+            print(f"  慢节点列表:")
+            for node in self.slow_nodes:
+                if node['is_slow']:
+                    print(f"    - {node['node_name']}: 平均分数 {node['avg_score']:.2f}")
+        else:
+            print("  未检测到慢节点")
                 
-                self.slow_nodes = []
-                for node_name, score in sorted_nodes:
-                    is_slow = score > slow_threshold
-                    self.slow_nodes.append({
-                        'node_name': node_name,
-                        'avg_score': score,
-                        'is_slow': is_slow
-                    })
-                
-                print(f"简单方法识别结果:")
-                print(f"  慢节点阈值: {slow_threshold:.2f}")
-                for node in self.slow_nodes:
-                    status = "慢节点" if node['is_slow'] else "正常节点"
-                    print(f"  {node['node_name']}: {node['avg_score']:.2f} ({status})")
-    
     
     def visualize(self):
         """
