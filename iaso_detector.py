@@ -266,8 +266,8 @@ class IasoDetector:
         if not all_timestamps:
             print("警告: 没有分数数据可用于慢节点识别!")
             return
-        
-        print(all_timestamps)
+
+        # print(all_timestamps)
 
         # 确定时间范围
         start_time = min(all_timestamps)
@@ -306,79 +306,230 @@ class IasoDetector:
             print("警告: 没有足够的数据进行慢节点识别!")
             return
 
-        print(interval_data)
+        # print(interval_data)
+
+        # # 以csv导出每个时间窗口的节点的30-th分数
+        # interval_output_file = os.path.join(self.output_dir, 'slow_node_interval_scores.csv')
+        # interval_rows = []
+        # for interval in interval_data:
+        #     row = {'timestamp': interval['timestamp']}
+        #     row.update(interval['scores'])
+        #     interval_rows.append(row)
+        # interval_df = pd.DataFrame(interval_rows)
+        # interval_df.to_csv(interval_output_file, index=False)
+        # print(f"  时间间隔节点30th分数已导出到: {interval_output_file}")
 
         print(f"收集到 {len(interval_data)} 个时间间隔的数据")
         
         # 进行DBSCAN聚类识别慢节点
         self._cluster_nodes_with_dbscan(interval_data)
     
+    # TODO
     def _cluster_nodes_with_dbscan(self, interval_data):
         """
-        使用DBSCAN对节点进行聚类以识别慢节点
+        使用DBSCAN对每个时间间隔的节点分数进行聚类，限定结果为两类
         
         参数:
         - interval_data: 包含每个时间间隔节点分数的数据
         """
-        node_avg_scores = {}
-        for node_name in self.nodes_score_db.keys():
-            scores = []
-            for data in interval_data:
-                if node_name in data['scores']:
-                    scores.append(data['scores'][node_name])
+        if len(interval_data) == 0:
+            print("警告: 没有时间间隔数据，无法进行聚类分析!")
+            return
             
-            if scores:
-                node_avg_scores[node_name] = np.mean(scores)
-            
-        if len(node_avg_scores) < 2:
+        # 获取所有节点名称
+        all_nodes = set()
+        for data in interval_data:
+            all_nodes.update(data['scores'].keys())
+        all_nodes = sorted(list(all_nodes))
+        
+        if len(all_nodes) < 2:
             print("警告: 节点数量不足，无法进行聚类分析!")
             return
             
-        # 准备DBSCAN输入数据
-        node_names = list(node_avg_scores.keys())
-        scores = np.array([[score] for score in node_avg_scores.values()])
+        print(f"对 {len(interval_data)} 个时间间隔进行DBSCAN聚类，节点: {all_nodes}")
+        
+        # 记录每个时间间隔的聚类结果
+        interval_clustering_results = []
+        
+        for i, data in enumerate(interval_data):
+            timestamp = data['timestamp']
+            scores = data['scores']
             
-        print(f"节点平均30th百分位分数:")
-        for node_name, score in node_avg_scores.items():
-            print(f"  {node_name}: {score:.2f}")
+            node_scores = []
+            node_names = []
+            for node in all_nodes:
+                if node in scores:
+                    node_scores.append(scores[node])
+                    node_names.append(node)
             
-        # 使用简单的阈值方法替代DBSCAN（因为sklearn可能不可用）
-        # 如果节点分数明显高于其他节点，则标记为慢节点
-        score_values = list(node_avg_scores.values())
-        median_score = np.median(score_values)
-        std_score = np.std(score_values)
-        slow_threshold = median_score + std_score  # 超过中位数+标准差的节点视为慢节点
+            if len(node_scores) < 2:
+                continue
+                
+            # 准备DBSCAN输入数据 (每个节点的分数作为一个样本点)
+            X = np.array([[score] for score in node_scores])
             
+            # 尝试不同的eps值来得到最多两类的聚类结果
+            best_clustering = None
+            best_eps = None
+            best_n_clusters = 0
+            
+            # 从配置文件获取DBSCAN参数
+            eps_values = [self.dbscan_eps, self.dbscan_eps * 0.5, 
+                         self.dbscan_eps * 2.0, self.dbscan_eps * 0.25,
+                         self.dbscan_eps * 4.0]
+            
+            for eps in eps_values:
+                dbscan = DBSCAN(eps=eps, min_samples=self.dbscan_min_samples)
+                labels = dbscan.fit_predict(X)
+                
+                # 计算聚类数量（排除噪声点 -1）
+                unique_labels = set(labels)
+                n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                
+                # 选择聚类数量最多为2且最接近2的结果
+                if n_clusters <= 2 and n_clusters > best_n_clusters:
+                    best_clustering = labels
+                    best_eps = eps
+                    best_n_clusters = n_clusters
+            
+            # 如果DBSCAN无法得到有效聚类（最多2类），使用默认参数
+            if best_clustering is None:
+                print(f"  时间间隔 {i+1} ({timestamp}): DBSCAN无法得到有效聚类，使用默认参数")
+                dbscan = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples)
+                best_clustering = dbscan.fit_predict(X)
+                best_eps = self.dbscan_eps
+                
+                # 检查聚类数量
+                unique_labels = set(best_clustering)
+                best_n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+            
+            # 记录此时间间隔的聚类结果
+            interval_result = {
+                'timestamp': timestamp,
+                'eps': best_eps,
+                'node_clustering': {}
+            }
+            
+            for j, node in enumerate(node_names):
+                cluster_id = int(best_clustering[j])
+                interval_result['node_clustering'][node] = {
+                    'score': node_scores[j],
+                    'cluster': cluster_id
+                }
+            
+            interval_clustering_results.append(interval_result)
+
+            # print(interval_result)
+            
+            # 输出此时间间隔的聚类结果
+            clusters = {}
+            for node, info in interval_result['node_clustering'].items():
+                cluster_id = info['cluster']
+                if cluster_id not in clusters:
+                    clusters[cluster_id] = []
+                clusters[cluster_id].append(node)
+            
+            print(f"  时间间隔 {i+1} ({timestamp}), eps={best_eps}, 聚类数={best_n_clusters}:")
+            for cluster_id in sorted(clusters.keys()):
+                if cluster_id == -1:
+                    print(f"    噪声点: {clusters[cluster_id]}")
+                else:
+                    print(f"    类别{cluster_id}: {clusters[cluster_id]}")
+        
+        # 统计每个节点在所有时间间隔中被分到类别1的次数（假设类别1是"慢节点"类别）
+        node_slow_counts = {}
+        total_intervals = len(interval_clustering_results)
+        
+        for node in all_nodes:
+            slow_count = 0
+            for result in interval_clustering_results:
+                if node in result['node_clustering']:
+                    # 判断哪个类别的平均分数更高，将其视为"慢节点"类别
+                    cluster_scores = {}
+                    for n, info in result['node_clustering'].items(): # info: {'score': xx, 'cluster': yy}
+                        cluster_id = info['cluster']
+                        # 排除噪声点
+                        if cluster_id != -1:
+                            if cluster_id not in cluster_scores:
+                                cluster_scores[cluster_id] = []
+                            cluster_scores[cluster_id].append(info['score'])
+                    
+                    # 如果只有噪声点或没有有效聚类，跳过此时间间隔
+                    if not cluster_scores:
+                        continue
+                    
+                    # 计算每个类别的平均分数
+                    cluster_avg_scores = {}
+                    for cluster_id, scores in cluster_scores.items():
+                        cluster_avg_scores[cluster_id] = np.mean(scores)
+                    
+                    # 找到平均分数最高的类别作为"慢节点"类别
+                    slow_cluster = max(cluster_avg_scores.keys(), key=lambda x: cluster_avg_scores[x])
+                    
+                    # 只有当节点不是噪声点且属于慢节点类别时才计数
+                    node_cluster = result['node_clustering'][node]['cluster']
+                    if node_cluster != -1 and node_cluster == slow_cluster:
+                        slow_count += 1
+            
+            node_slow_counts[node] = slow_count
+        # 有可能聚类结果只有一类，那么需要再进行判断
+
+        # 设置结果
+        # 节点实在太少了
+        # 如果节点多的话这一步应该是不需要的
         self.slow_nodes = []
-        for node_name, score in node_avg_scores.items():
-            if score > slow_threshold:
-                self.slow_nodes.append({
-                    'node_name': node_name,
-                    'avg_score': score,
-                    'is_slow': True
-                })
-            else:
-                self.slow_nodes.append({
-                    'node_name': node_name,
-                    'avg_score': score,
-                    'is_slow': False
-                })
+        for node in all_nodes:
+            slow_ratio = node_slow_counts[node] / total_intervals if total_intervals > 0 else 0
+            is_slow = slow_ratio > 0.5  # 超过一半的时间间隔被分类为慢节点
             
-        # 输出结果
+            # 计算该节点的平均分数
+            avg_score = 0
+            count = 0
+            for result in interval_clustering_results:
+                if node in result['node_clustering']:
+                    avg_score += result['node_clustering'][node]['score']
+                    count += 1
+            avg_score = avg_score / count if count > 0 else 0
+            
+            self.slow_nodes.append({
+                'node_name': node,
+                'avg_score': avg_score,
+                'slow_ratio': slow_ratio,
+                'slow_count': node_slow_counts[node],
+                'is_slow': is_slow
+            })
+        
+        # 输出最终结果
         slow_count = sum(1 for node in self.slow_nodes if node['is_slow'])
-        print(f"\n慢节点识别结果:")
+        print(f"\n最终慢节点识别结果 (基于 {total_intervals} 个时间间隔的DBSCAN聚类):")
         print(f"  总节点数: {len(self.slow_nodes)}")
         print(f"  慢节点数: {slow_count}")
-        print(f"  慢节点阈值: {slow_threshold:.2f}")
-            
-        if slow_count > 0:
-            print(f"  慢节点列表:")
-            for node in self.slow_nodes:
-                if node['is_slow']:
-                    print(f"    - {node['node_name']}: 平均分数 {node['avg_score']:.2f}")
-        else:
-            print("  未检测到慢节点")
-                
+        
+        print(f"  节点详细信息:")
+        for node in self.slow_nodes:
+            status = "慢节点" if node['is_slow'] else "正常节点"
+            print(f"    - {node['node_name']}: 平均分数 {node['avg_score']:.2f}, "
+                  f"慢节点比例 {node['slow_ratio']:.2f} ({node['slow_count']}/{total_intervals}), "
+                  f"状态: {status}")
+        
+        # 保存聚类结果到文件
+        clustering_output_file = os.path.join(self.output_dir, 'dbscan_clustering_results.csv')
+        clustering_rows = []
+        for result in interval_clustering_results:
+            for node, info in result['node_clustering'].items():
+                clustering_rows.append({
+                    'timestamp': result['timestamp'],
+                    'eps': result['eps'],
+                    'node': node,
+                    'score': info['score'],
+                    'cluster': info['cluster'],
+                    "slow_count": node_slow_counts[node],
+                })
+        
+        if clustering_rows:
+            clustering_df = pd.DataFrame(clustering_rows)
+            clustering_df.to_csv(clustering_output_file, index=False)
+            print(f"  DBSCAN聚类详细结果已导出到: {clustering_output_file}")    
     
     def visualize(self):
         """
